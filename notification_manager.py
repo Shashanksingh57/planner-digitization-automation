@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Notification Manager - Slack and Notion notifications
+Notification Manager - Enhanced logging and optional Notion notifications
 Handles all notification logic for the planner digitization automation
 """
 
@@ -12,8 +12,6 @@ from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass
 
 import requests
-from slack_sdk import WebClient
-from slack_sdk.errors import SlackApiError
 from notion_client import Client
 
 logger = logging.getLogger(__name__)
@@ -32,29 +30,24 @@ class ProcessingResult:
 @dataclass
 class NotificationConfig:
     """Configuration for notifications"""
-    slack_webhook_url: Optional[str] = None
-    slack_channel: str = "personal-automation"
     notion_token: Optional[str] = None
     notion_database_id: Optional[str] = None
-    enable_slack: bool = True
-    enable_notion_comments: bool = True
+    enable_notion_comments: bool = False  # Disabled by default
+    enhanced_logging: bool = True
 
 class NotificationManager:
-    """Manages notifications for planner digitization automation"""
+    """Manages enhanced logging and optional Notion notifications for planner digitization automation"""
     
     def __init__(self, config: NotificationConfig):
         self.config = config
-        self.slack_client = None
         self.notion_client = None
         
-        # Initialize Slack client
-        if config.enable_slack and config.slack_webhook_url:
-            self.slack_webhook_url = config.slack_webhook_url
-            logger.info("Slack notifications enabled")
-        else:
-            logger.warning("Slack notifications disabled - no webhook URL")
+        # Setup enhanced logging
+        if config.enhanced_logging:
+            self._setup_enhanced_logging()
+            logger.info("Enhanced logging enabled for notifications")
         
-        # Initialize Notion client
+        # Initialize Notion client (optional)
         if config.enable_notion_comments and config.notion_token:
             try:
                 self.notion_client = Client(auth=config.notion_token)
@@ -62,31 +55,47 @@ class NotificationManager:
             except Exception as e:
                 logger.error(f"Failed to initialize Notion client: {e}")
         else:
-            logger.warning("Notion comments disabled")
+            logger.info("Notion comments disabled")
+    
+    def _setup_enhanced_logging(self):
+        """Setup enhanced logging for detailed notification output"""
+        # Create a notification-specific logger
+        self.notification_logger = logging.getLogger('automation.notifications')
+        
+        # Add console handler with special formatting for notifications
+        if not any(isinstance(h, logging.StreamHandler) for h in self.notification_logger.handlers):
+            console_handler = logging.StreamHandler()
+            formatter = logging.Formatter(
+                '\n%(asctime)s - 📢 NOTIFICATION - %(levelname)s\n%(message)s\n' + '='*80
+            )
+            console_handler.setFormatter(formatter)
+            self.notification_logger.addHandler(console_handler)
+            self.notification_logger.setLevel(logging.INFO)
     
     def send_processing_notification(self, result: ProcessingResult, 
                                    batch_files: List[str]) -> bool:
-        """Send notification about processing results"""
+        """Send enhanced logging notification about processing results"""
         try:
             # Generate summary message
             total_files = len(batch_files)
             success_rate = (result.success_count / total_files * 100) if total_files > 0 else 0
             
-            # Create message
+            # Create detailed log message
             message = self._format_processing_message(result, batch_files, success_rate)
             
-            # Send to Slack
-            slack_sent = False
-            if self.config.enable_slack:
-                slack_sent = self._send_slack_message(message)
+            # Log with enhanced formatting
+            if self.config.enhanced_logging:
+                self.notification_logger.info(message)
+            else:
+                logger.info(f"Processing complete - {result.success_count}/{total_files} successful")
             
-            # Add Notion comments for errors if any
+            # Add Notion comments for errors if enabled
             notion_updated = False
             if self.config.enable_notion_comments and result.errors:
                 notion_updated = self._add_notion_error_comments(result.errors)
             
-            logger.info(f"Notifications sent - Slack: {slack_sent}, Notion: {notion_updated}")
-            return slack_sent or notion_updated
+            logger.debug(f"Notifications processed - Enhanced logging: {self.config.enhanced_logging}, Notion: {notion_updated}")
+            return True  # Always successful since we're just logging
             
         except Exception as e:
             logger.error(f"Error sending processing notification: {e}")
@@ -94,31 +103,36 @@ class NotificationManager:
     
     def send_gap_detection_notification(self, gaps: List[Dict], 
                                       detected_dates: List[datetime]) -> bool:
-        """Send notification about detected date gaps"""
+        """Send enhanced logging notification about detected date gaps"""
         try:
             if not gaps:
-                return True  # No gaps is good news, no notification needed
+                logger.info("Date gap detection: No gaps found - all dates are continuous")
+                return True
             
             message = self._format_gap_message(gaps, detected_dates)
             
-            if self.config.enable_slack:
-                return self._send_slack_message(message)
+            if self.config.enhanced_logging:
+                self.notification_logger.warning(message)
+            else:
+                logger.warning(f"Date gaps detected: {len(gaps)} gaps found in sequence")
             
-            return False
+            return True
             
         except Exception as e:
             logger.error(f"Error sending gap notification: {e}")
             return False
     
     def send_reminder_notification(self, stats: Dict) -> bool:
-        """Send weekly reminder notification with stats"""
+        """Send weekly reminder as enhanced log message"""
         try:
             message = self._format_reminder_message(stats)
             
-            if self.config.enable_slack:
-                return self._send_slack_message(message)
+            if self.config.enhanced_logging:
+                self.notification_logger.info(message)
+            else:
+                logger.info("Weekly reminder: Don't forget to scan your daily planner pages!")
             
-            return False
+            return True
             
         except Exception as e:
             logger.error(f"Error sending reminder notification: {e}")
@@ -126,14 +140,16 @@ class NotificationManager:
     
     def send_error_notification(self, error_type: str, error_message: str, 
                               context: Optional[Dict] = None) -> bool:
-        """Send notification about critical errors"""
+        """Send critical error notification via enhanced logging"""
         try:
             message = self._format_error_message(error_type, error_message, context)
             
-            if self.config.enable_slack:
-                return self._send_slack_message(message, urgent=True)
+            if self.config.enhanced_logging:
+                self.notification_logger.error(message)
+            else:
+                logger.error(f"Critical error - {error_type}: {error_message}")
             
-            return False
+            return True
             
         except Exception as e:
             logger.error(f"Error sending error notification: {e}")
@@ -141,130 +157,135 @@ class NotificationManager:
     
     def _format_processing_message(self, result: ProcessingResult, 
                                  batch_files: List[str], success_rate: float) -> str:
-        """Format processing result message"""
+        """Format processing result message for enhanced logging"""
         total_files = len(batch_files)
         
-        # Status emoji based on success rate
+        # Status indicator based on success rate
         if success_rate >= 90:
-            status_emoji = "✅"
+            status = "SUCCESS"
         elif success_rate >= 70:
-            status_emoji = "⚠️"
+            status = "PARTIAL SUCCESS"
         else:
-            status_emoji = "❌"
+            status = "FAILED"
         
-        message = f"{status_emoji} **Planner Processing Complete**\n\n"
-        message += f"📊 **Summary:**\n"
-        message += f"• Total files: {total_files}\n"
-        message += f"• Success: {result.success_count} ({success_rate:.1f}%)\n"
-        message += f"• Errors: {result.error_count}\n"
-        message += f"• New entries: {result.new_entries}\n"
-        message += f"• Updated entries: {result.updated_entries}\n"
-        message += f"• Skipped: {result.skipped_count}\n"
-        message += f"• Processing time: {result.processing_time:.1f}s\n\n"
+        message = f"PLANNER PROCESSING {status}\n"
+        message += f"{'='*50}\n"
+        message += f"📊 PROCESSING SUMMARY:\n"
+        message += f"   • Total files processed: {total_files}\n"
+        message += f"   • Successful: {result.success_count} ({success_rate:.1f}%)\n"
+        message += f"   • Failed: {result.error_count}\n"
+        message += f"   • New entries created: {result.new_entries}\n"
+        message += f"   • Existing entries updated: {result.updated_entries}\n"
+        message += f"   • Files skipped: {result.skipped_count}\n"
+        message += f"   • Total processing time: {result.processing_time:.1f} seconds\n"
+        
+        if batch_files:
+            message += f"\n📁 PROCESSED FILES:\n"
+            for i, file_path in enumerate(batch_files[:10], 1):  # Show max 10 files
+                from pathlib import Path
+                filename = Path(file_path).name
+                message += f"   {i}. {filename}\n"
+            if len(batch_files) > 10:
+                message += f"   ... and {len(batch_files) - 10} more files\n"
         
         if result.errors:
-            message += f"🚨 **Errors:**\n"
-            for error in result.errors[:3]:  # Show max 3 errors
-                message += f"• {error}\n"
-            if len(result.errors) > 3:
-                message += f"• ... and {len(result.errors) - 3} more errors\n"
-            message += "\n"
+            message += f"\n🚨 ERRORS ENCOUNTERED:\n"
+            for i, error in enumerate(result.errors[:5], 1):  # Show max 5 errors
+                message += f"   {i}. {error}\n"
+            if len(result.errors) > 5:
+                message += f"   ... and {len(result.errors) - 5} more errors\n"
         
-        message += f"📅 **Processed:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        message += f"\n⏰ Completed at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         
         return message
     
     def _format_gap_message(self, gaps: List[Dict], detected_dates: List[datetime]) -> str:
-        """Format date gap detection message"""
+        """Format date gap detection message for enhanced logging"""
         total_gaps = len(gaps)
         total_missing = sum(len(gap.get('missing_dates', [])) for gap in gaps)
         
-        message = f"📅 **Date Gap Detection Results**\n\n"
-        message += f"• Found {total_gaps} gaps\n"
-        message += f"• Total missing days: {total_missing}\n"
-        message += f"• Analyzed {len(detected_dates)} dates\n\n"
+        message = f"DATE GAP DETECTION RESULTS\n"
+        message += f"{'='*50}\n"
+        message += f"🔍 ANALYSIS SUMMARY:\n"
+        message += f"   • Gaps found: {total_gaps}\n"
+        message += f"   • Total missing days: {total_missing}\n"
+        message += f"   • Dates analyzed: {len(detected_dates)}\n"
         
         if gaps:
-            message += f"🔍 **Detected Gaps:**\n"
-            for i, gap in enumerate(gaps[:5], 1):  # Show max 5 gaps
+            message += f"\n📅 DETECTED GAPS:\n"
+            for i, gap in enumerate(gaps[:10], 1):  # Show max 10 gaps
                 start = gap.get('start_date', 'Unknown')
                 end = gap.get('end_date', 'Unknown')
-                missing_count = len(gap.get('missing_dates', []))
-                message += f"{i}. {start} → {end} ({missing_count} days)\n"
+                missing_dates = gap.get('missing_dates', [])
+                missing_count = len(missing_dates)
+                
+                message += f"   {i}. Gap: {start} → {end} ({missing_count} missing days)\n"
+                
+                # Show missing dates for smaller gaps
+                if missing_count <= 5 and missing_dates:
+                    missing_str = ", ".join(missing_dates[:5])
+                    message += f"      Missing: {missing_str}\n"
+                elif missing_count > 5:
+                    missing_str = ", ".join(missing_dates[:3])
+                    message += f"      Missing: {missing_str}... and {missing_count - 3} more\n"
             
-            if len(gaps) > 5:
-                message += f"• ... and {len(gaps) - 5} more gaps\n"
+            if len(gaps) > 10:
+                message += f"   ... and {len(gaps) - 10} more gaps\n"
+            
+            message += f"\n⚠️  ACTION REQUIRED: Please scan missing planner pages to maintain complete records"
         
         return message
     
     def _format_reminder_message(self, stats: Dict) -> str:
-        """Format weekly reminder message"""
-        message = f"📱 **Weekly Planner Reminder**\n\n"
-        message += f"📊 **Current Stats:**\n"
+        """Format weekly reminder message for enhanced logging"""
+        message = f"WEEKLY PLANNER REMINDER\n"
+        message += f"{'='*50}\n"
+        message += f"📊 AUTOMATION STATUS:\n"
         
         if 'total_entries' in stats:
-            message += f"• Total entries: {stats['total_entries']}\n"
+            message += f"   • Total entries processed: {stats['total_entries']}\n"
         if 'last_processed' in stats:
-            message += f"• Last processed: {stats['last_processed']}\n"
+            message += f"   • Last processing date: {stats['last_processed']}\n"
         if 'pending_count' in stats:
-            message += f"• Pending files: {stats['pending_count']}\n"
+            message += f"   • Pending files in queue: {stats['pending_count']}\n"
         if 'completion_rate' in stats:
-            message += f"• Completion rate: {stats['completion_rate']:.1f}%\n"
+            message += f"   • Overall success rate: {stats['completion_rate']:.1f}%\n"
+        if 'automation_uptime' in stats:
+            message += f"   • System uptime: {stats['automation_uptime']}\n"
         
-        message += f"\n💡 **Reminder:** Don't forget to scan your daily planner pages!"
-        message += f"\n📸 Drop new images in your watch folder for automatic processing."
+        message += f"\n💡 MAINTENANCE REMINDER:\n"
+        message += f"   • Scan daily planner pages regularly\n"
+        message += f"   • Drop new images in watch folder for automatic processing\n"
+        message += f"   • Check automation logs for any issues\n"
+        message += f"   • Review processed entries in Notion database\n"
+        
+        message += f"\n📁 Watch folder: {stats.get('watch_folder', 'Not configured')}"
         
         return message
     
     def _format_error_message(self, error_type: str, error_message: str, 
                             context: Optional[Dict] = None) -> str:
-        """Format error notification message"""
-        message = f"🚨 **Planner Automation Error**\n\n"
-        message += f"**Type:** {error_type}\n"
-        message += f"**Message:** {error_message}\n"
-        message += f"**Time:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+        """Format error notification message for enhanced logging"""
+        message = f"CRITICAL AUTOMATION ERROR\n"
+        message += f"{'='*50}\n"
+        message += f"🚨 ERROR DETAILS:\n"
+        message += f"   • Type: {error_type}\n"
+        message += f"   • Message: {error_message}\n"
+        message += f"   • Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
         
         if context:
-            message += f"\n**Context:**\n"
+            message += f"\n📋 CONTEXT INFORMATION:\n"
             for key, value in context.items():
-                message += f"• {key}: {value}\n"
+                message += f"   • {key}: {value}\n"
         
-        message += f"\n⚠️ **Action Required:** Please check the automation logs."
+        message += f"\n🔧 RECOMMENDED ACTIONS:\n"
+        message += f"   • Check automation logs for detailed error traces\n"
+        message += f"   • Verify system configuration and dependencies\n"
+        message += f"   • Test individual components if error persists\n"
+        message += f"   • Review environment variables and API keys\n"
         
         return message
     
-    def _send_slack_message(self, message: str, urgent: bool = False) -> bool:
-        """Send message to Slack via webhook"""
-        try:
-            if not self.slack_webhook_url:
-                logger.warning("No Slack webhook URL configured")
-                return False
-            
-            # Format message for Slack
-            slack_message = {
-                "channel": self.config.slack_channel,
-                "text": message,
-                "username": "Planner Automation",
-                "icon_emoji": ":robot_face:" if not urgent else ":warning:"
-            }
-            
-            # Send to webhook
-            response = requests.post(
-                self.slack_webhook_url,
-                json=slack_message,
-                timeout=10
-            )
-            
-            if response.status_code == 200:
-                logger.info("Slack message sent successfully")
-                return True
-            else:
-                logger.error(f"Slack webhook failed: {response.status_code} - {response.text}")
-                return False
-                
-        except Exception as e:
-            logger.error(f"Error sending Slack message: {e}")
-            return False
     
     def _add_notion_error_comments(self, errors: List[str]) -> bool:
         """Add error comments to Notion pages"""
@@ -370,14 +391,12 @@ def test_notification_manager():
     from dotenv import load_dotenv
     load_dotenv()
     
-    # Test configuration
+    # Test configuration - enhanced logging only
     config = NotificationConfig(
-        slack_webhook_url=os.getenv('SLACK_WEBHOOK_URL'),
-        slack_channel="test-automation",
         notion_token=os.getenv('NOTION_TOKEN'),
         notion_database_id=os.getenv('NOTION_DATABASE_ID'),
-        enable_slack=True,
-        enable_notion_comments=False  # Disable for testing
+        enable_notion_comments=False,  # Disable for testing
+        enhanced_logging=True
     )
     
     # Test notification manager
@@ -397,7 +416,19 @@ def test_notification_manager():
     test_files = ["image_001.jpg", "image_002.jpg", "image_003.jpg"]
     
     success = manager.send_processing_notification(test_result, test_files)
-    print(f"Processing notification sent: {success}")
+    print(f"Processing notification logged: {success}")
+    
+    # Test gap detection notification
+    test_gaps = [
+        {
+            'start_date': '2025-01-15',
+            'end_date': '2025-01-18',
+            'missing_dates': ['2025-01-16', '2025-01-17']
+        }
+    ]
+    
+    success = manager.send_gap_detection_notification(test_gaps, [])
+    print(f"Gap detection notification logged: {success}")
     
     # Test error notification
     success = manager.send_error_notification(
@@ -405,7 +436,17 @@ def test_notification_manager():
         "Failed to access watch folder",
         {"folder": "/path/to/watch", "error_code": "EACCES"}
     )
-    print(f"Error notification sent: {success}")
+    print(f"Error notification logged: {success}")
+    
+    # Test reminder notification
+    test_stats = {
+        'total_entries': 189,
+        'last_processed': '2025-01-15',
+        'automation_uptime': '2 days, 3:45:22'
+    }
+    
+    success = manager.send_reminder_notification(test_stats)
+    print(f"Reminder notification logged: {success}")
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')

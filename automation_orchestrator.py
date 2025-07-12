@@ -39,10 +39,6 @@ class AutomationConfig:
     retry_attempts: int = 3
     batch_size: int = 5
     
-    # Notifications
-    slack_webhook_url: Optional[str] = None
-    slack_channel: str = "personal-automation"
-    
     # Notion
     notion_token: Optional[str] = None
     notion_database_id: Optional[str] = None
@@ -55,6 +51,7 @@ class AutomationConfig:
     # Logging
     log_level: str = "INFO"
     log_file: Optional[str] = None
+    enhanced_logging: bool = True
 
 class AutomationOrchestrator:
     """Main orchestrator for planner digitization automation"""
@@ -138,12 +135,10 @@ class AutomationOrchestrator:
             
             # Notification manager
             notification_config = NotificationConfig(
-                slack_webhook_url=self.config.slack_webhook_url,
-                slack_channel=self.config.slack_channel,
                 notion_token=self.config.notion_token,
                 notion_database_id=self.config.notion_database_id,
-                enable_slack=bool(self.config.slack_webhook_url),
-                enable_notion_comments=bool(self.config.notion_token)
+                enable_notion_comments=False,  # Disabled by default
+                enhanced_logging=self.config.enhanced_logging
             )
             self.notifier = NotificationManager(notification_config)
             logger.info("Notification manager initialized")
@@ -188,21 +183,15 @@ class AutomationOrchestrator:
             self.running = True
             logger.info("✅ Automation system started successfully")
             
-            # Send startup notification
-            if self.notifier:
-                startup_stats = self._get_current_stats()
-                self.notifier.send_processing_notification(
-                    ProcessingResult(
-                        success_count=0,
-                        error_count=0,
-                        new_entries=0,
-                        updated_entries=0,
-                        skipped_count=0,
-                        processing_time=0,
-                        errors=[]
-                    ),
-                    []
-                )
+            # Log startup status
+            startup_stats = self._get_current_stats()
+            logger.info("📢 Automation system started successfully")
+            logger.info(f"📁 Watching: {self.config.watch_folder}")
+            logger.info(f"🔧 Digitizer: {self.config.digitizer_path}")
+            logger.info(f"⏱️  Pause trigger: {self.config.pause_minutes} minutes")
+            logger.info(f"🔄 Retry attempts: {self.config.retry_attempts}")
+            if startup_stats.get('total_processed'):
+                logger.info(f"📊 Found {startup_stats['total_processed']} existing processed files")
             
         except Exception as e:
             logger.error(f"Failed to start automation: {e}")
@@ -470,10 +459,6 @@ def load_config_from_env() -> AutomationConfig:
         retry_attempts=int(os.getenv('RETRY_ATTEMPTS', '3')),
         batch_size=int(os.getenv('BATCH_SIZE', '5')),
         
-        # Notifications
-        slack_webhook_url=os.getenv('SLACK_WEBHOOK_URL'),
-        slack_channel=os.getenv('SLACK_CHANNEL_NAME', 'personal-automation'),
-        
         # Notion
         notion_token=os.getenv('NOTION_TOKEN'),
         notion_database_id=os.getenv('NOTION_DATABASE_ID'),
@@ -485,7 +470,8 @@ def load_config_from_env() -> AutomationConfig:
         
         # Logging
         log_level=os.getenv('LOG_LEVEL', 'INFO'),
-        log_file=os.getenv('LOG_FILE')
+        log_file=os.getenv('LOG_FILE'),
+        enhanced_logging=os.getenv('ENHANCED_LOGGING', 'true').lower() == 'true'
     )
 
 def main():

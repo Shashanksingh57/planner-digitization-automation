@@ -10,7 +10,7 @@ A complete automation system for digitizing handwritten daily planner pages usin
 - **📊 Notion Integration**: Automatically uploads parsed data to Notion databases
 - **📅 Date Validation**: Extracts and validates dates, detects gaps in sequences
 - **🔄 Retry Logic**: Robust error handling with configurable retry attempts
-- **📲 Slack Notifications**: Real-time updates on processing status and errors
+- **📋 Enhanced Logging**: Detailed notifications and status updates via structured logging
 - **⏰ Scheduled Reminders**: Weekly reminders to maintain consistent planner scanning
 - **🔍 Gap Detection**: Identifies missing dates in your planner sequence
 
@@ -110,11 +110,18 @@ Create a Notion database with these properties:
 - **Schedule** (rich_text): Daily schedule entries
 - **Notes** (rich_text): Additional notes
 
-### 5. Slack Integration (Optional)
+### 5. Enhanced Logging Configuration
 
-1. Create a Slack app in your workspace
-2. Add an Incoming Webhook
-3. Copy the webhook URL to your `.env` file
+The system uses structured logging for all notifications:
+
+```bash
+# In your .env file
+LOG_LEVEL=INFO
+LOG_FILE=automation.log
+ENHANCED_LOGGING=true
+```
+
+Enhanced logging provides detailed status updates in the console and log files.
 
 ## Usage
 
@@ -130,7 +137,7 @@ The system will:
 2. Wait 2 minutes after file activity stops
 3. Process images using OCR and AI parsing
 4. Upload structured data to Notion
-5. Send notifications about results
+5. Log detailed processing results and status
 6. Detect and report date gaps
 
 ### Manual Processing
@@ -155,10 +162,10 @@ python notification_manager.py
 
 The automation provides several monitoring features:
 
-- **Real-time Logs**: Console and file logging with configurable levels
-- **Slack Notifications**: Processing results, errors, and weekly reminders
-- **Date Gap Detection**: Identifies missing planner pages
-- **Processing Statistics**: Tracks success rates and performance
+- **Enhanced Logging**: Structured console and file logging with detailed formatting
+- **Processing Statistics**: Tracks success rates and performance metrics
+- **Date Gap Detection**: Identifies missing planner pages with detailed reports
+- **Error Tracking**: Comprehensive error logging with context and recommendations
 
 ## Configuration Options
 
@@ -168,10 +175,11 @@ The automation provides several monitoring features:
 - **`RETRY_ATTEMPTS`**: Number of retry attempts for failed processing (default: 3)
 - **`BATCH_SIZE`**: Number of images to process in each batch (default: 5)
 
-### Notification Configuration
+### Logging Configuration
 
-- **`SLACK_WEBHOOK_URL`**: Slack webhook for notifications
-- **`SLACK_CHANNEL_NAME`**: Target Slack channel (default: personal-automation)
+- **`LOG_LEVEL`**: Logging verbosity (DEBUG, INFO, WARNING, ERROR)
+- **`LOG_FILE`**: Optional log file path for persistent logging
+- **`ENHANCED_LOGGING`**: Enable structured notification formatting (default: true)
 
 ### Reminder Configuration
 
