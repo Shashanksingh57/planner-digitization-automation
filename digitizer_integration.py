@@ -134,26 +134,59 @@ class DigitizerIntegration:
         return results
     
     def _run_digitizer(self, image_path: str, upload_to_notion: bool) -> DigitizerResult:
-        """Run the digitizer CLI for a single image"""
+        """Run the digitizer CLI using two-step process"""
         try:
-            # Build command
+            # Step 1: Process image with planner_digitizer.py
+            step1_result = self._run_digitizer_step1(image_path)
+            
+            if not step1_result.success:
+                return step1_result
+            
+            # Step 2: Upload to Notion if requested
+            if upload_to_notion and self.has_notion_uploader:
+                step2_result = self._run_notion_upload_step2(step1_result)
+                
+                # Combine results
+                total_time = step1_result.processing_time + step2_result.processing_time
+                
+                if step2_result.success:
+                    return DigitizerResult(
+                        success=True,
+                        image_path=image_path,
+                        output_data=step1_result.output_data,
+                        processing_time=total_time
+                    )
+                else:
+                    return DigitizerResult(
+                        success=False,
+                        image_path=image_path,
+                        output_data=step1_result.output_data,
+                        error_message=f"Step 1 succeeded but Step 2 failed: {step2_result.error_message}",
+                        processing_time=total_time
+                    )
+            else:
+                # Return step 1 result if no Notion upload needed
+                return step1_result
+                
+        except Exception as e:
+            return DigitizerResult(
+                success=False,
+                image_path=image_path,
+                error_message=f"Two-step process failed: {str(e)}"
+            )
+    
+    def _run_digitizer_step1(self, image_path: str) -> DigitizerResult:
+        """Step 1: Run planner_digitizer.py to process image"""
+        try:
+            # Build command for step 1
             cmd = [
                 "python", str(self.digitizer_script),
-                "--parser", self.config.parser_type,
-                image_path
+                image_path,
+                "--parser", self.config.parser_type
             ]
             
-            # Add notion upload flag if available and requested
-            if upload_to_notion and self.has_notion_uploader:
-                cmd.append("--upload-notion")
-            
-            # Set up environment
-            env = os.environ.copy()
-            # Ensure API keys are available
-            if not env.get('OPENAI_API_KEY'):
-                logger.warning("OPENAI_API_KEY not found in environment")
-            if upload_to_notion and not env.get('NOTION_TOKEN'):
-                logger.warning("NOTION_TOKEN not found in environment")
+            # Set up environment - load from digitizer .env file
+            env = self._get_digitizer_environment()
             
             # Run digitizer with timeout
             start_time = time.time()
@@ -169,8 +202,16 @@ class DigitizerIntegration:
             processing_time = time.time() - start_time
             
             if result.returncode == 0:
-                # Parse output for structured data
+                # Parse output and find generated JSON file
                 output_data = self._parse_digitizer_output(result.stdout)
+                
+                # Try to find the generated JSON file
+                json_file_path = self._find_generated_json_file(image_path)
+                if json_file_path:
+                    # Load the actual JSON data
+                    with open(json_file_path, 'r') as f:
+                        file_data = json.load(f)
+                    output_data = file_data
                 
                 return DigitizerResult(
                     success=True,
@@ -182,7 +223,7 @@ class DigitizerIntegration:
                 return DigitizerResult(
                     success=False,
                     image_path=image_path,
-                    error_message=result.stderr or "Unknown error",
+                    error_message=f"Digitizer failed: {result.stderr or 'Unknown error'}",
                     processing_time=processing_time
                 )
                 
@@ -190,14 +231,130 @@ class DigitizerIntegration:
             return DigitizerResult(
                 success=False,
                 image_path=image_path,
-                error_message=f"Timeout after {self.config.timeout} seconds"
+                error_message=f"Digitizer timeout after {self.config.timeout} seconds"
             )
         except Exception as e:
             return DigitizerResult(
                 success=False,
                 image_path=image_path,
-                error_message=str(e)
+                error_message=f"Digitizer step 1 error: {str(e)}"
             )
+    
+    def _run_notion_upload_step2(self, step1_result: DigitizerResult) -> DigitizerResult:
+        """Step 2: Run notion_uploader.py to upload processed JSON"""
+        try:
+            # Find the generated JSON file for this image
+            json_file_path = self._find_generated_json_file(step1_result.image_path)
+            
+            if not json_file_path:
+                return DigitizerResult(
+                    success=False,
+                    image_path=step1_result.image_path,
+                    error_message="No JSON file found for Notion upload"
+                )
+            
+            # Build command for step 2
+            cmd = [
+                "python", str(self.notion_uploader),
+                str(json_file_path)
+            ]
+            
+            # Set up environment
+            env = self._get_digitizer_environment()
+            
+            # Run notion uploader with timeout
+            start_time = time.time()
+            result = subprocess.run(
+                cmd,
+                cwd=str(self.digitizer_path),
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=60  # Shorter timeout for upload step
+            )
+            
+            processing_time = time.time() - start_time
+            
+            if result.returncode == 0:
+                return DigitizerResult(
+                    success=True,
+                    image_path=step1_result.image_path,
+                    processing_time=processing_time
+                )
+            else:
+                return DigitizerResult(
+                    success=False,
+                    image_path=step1_result.image_path,
+                    error_message=f"Notion upload failed: {result.stderr or 'Unknown error'}",
+                    processing_time=processing_time
+                )
+                
+        except subprocess.TimeoutExpired:
+            return DigitizerResult(
+                success=False,
+                image_path=step1_result.image_path,
+                error_message="Notion upload timeout"
+            )
+        except Exception as e:
+            return DigitizerResult(
+                success=False,
+                image_path=step1_result.image_path,
+                error_message=f"Notion upload step 2 error: {str(e)}"
+            )
+    
+    def _find_generated_json_file(self, image_path: str) -> Optional[Path]:
+        """Find the JSON file generated for this image"""
+        try:
+            image_name = Path(image_path).stem
+            
+            # Check for JSON files in the Solution Outputs directory
+            output_dir = Path("/Users/shashanksingh/Desktop/AI Test Cases/Daily Planner Exports/Solution Outputs")
+            
+            # Look for [image_name]_processed.json
+            json_file = output_dir / f"{image_name}_processed.json"
+            if json_file.exists():
+                return json_file
+            
+            # Also check in the digitizer directory
+            json_file = self.digitizer_path / f"{image_name}_processed.json"
+            if json_file.exists():
+                return json_file
+            
+            # Look for any recently created JSON files
+            for json_file in output_dir.glob("*_processed.json"):
+                if json_file.stat().st_mtime > time.time() - 300:  # Last 5 minutes
+                    return json_file
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error finding JSON file for {image_path}: {e}")
+            return None
+    
+    def _get_digitizer_environment(self) -> Dict[str, str]:
+        """Get environment variables including those from digitizer .env file"""
+        env = os.environ.copy()
+        
+        # Load .env file from digitizer directory
+        env_file = self.digitizer_path / ".env"
+        if env_file.exists():
+            logger.debug(f"Loading environment from {env_file}")
+            try:
+                with open(env_file, 'r') as f:
+                    for line in f:
+                        line = line.strip()
+                        if line and not line.startswith('#') and '=' in line:
+                            key, value = line.split('=', 1)
+                            # Remove quotes if present
+                            if value.startswith('"') and value.endswith('"'):
+                                value = value[1:-1]
+                            if value.startswith("'") and value.endswith("'"):
+                                value = value[1:-1]
+                            env[key] = value
+            except Exception as e:
+                logger.warning(f"Error loading .env file: {e}")
+        
+        return env
     
     def _parse_digitizer_output(self, output: str) -> Optional[Dict]:
         """Parse structured data from digitizer output"""
@@ -282,21 +439,18 @@ class DigitizerIntegration:
     def get_processing_stats(self) -> Dict:
         """Get processing statistics from output directory"""
         try:
-            # Look for output files in the digitizer directory
-            output_patterns = [
-                self.digitizer_path / "*.json",
-                self.digitizer_path / "*_processed.json",
-                self.digitizer_path / "output" / "*.json"
-            ]
+            # Look for output files in the Solution Outputs directory
+            output_dir = Path("/Users/shashanksingh/Desktop/AI Test Cases/Daily Planner Exports/Solution Outputs")
+            processed_files = list(output_dir.glob("*_processed.json"))
             
-            processed_files = []
-            for pattern in output_patterns:
-                processed_files.extend(list(pattern.parent.glob(pattern.name)))
+            # Also check digitizer directory as fallback
+            digitizer_files = list(self.digitizer_path.glob("*_processed.json"))
+            processed_files.extend(digitizer_files)
             
             stats = {
                 "total_processed": len(processed_files),
                 "last_processed": None,
-                "output_directory": str(self.digitizer_path),
+                "output_directory": str(output_dir),
                 "has_notion_uploader": self.has_notion_uploader
             }
             
@@ -348,7 +502,7 @@ def test_digitizer_integration():
     
     # Test configuration
     config = ProcessingConfig(
-        digitizer_path="/Users/shashanksingh/Desktop/AI Projects/Planner Digitizer",
+        digitizer_path="/Users/shashanksingh/Desktop/AI Projects/dailyplanner-digitizer-automation",
         retry_attempts=2,
         retry_delay=2,
         timeout=60,

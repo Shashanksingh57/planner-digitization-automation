@@ -7,6 +7,7 @@ Extracts dates from planner images and identifies missing sequences
 import os
 import re
 import json
+import time
 import logging
 import subprocess
 from datetime import datetime, timedelta
@@ -45,31 +46,32 @@ class DateValidator:
         if not self.digitizer_path.exists():
             raise FileNotFoundError(f"Digitizer path not found: {self.digitizer_path}")
         
+        # Check for notion_query.py script
+        self.notion_query_script = self.digitizer_path / "notion_query.py"
+        if not self.notion_query_script.exists():
+            logger.warning(f"notion_query.py not found at {self.notion_query_script}")
+        
         # Initialize by loading existing dates from Notion
         self._load_existing_dates()
         
     def _load_existing_dates(self):
         """Load existing dates from Notion database"""
         try:
-            # Use existing notion query setup
-            query_script = self.digitizer_path / "notion_query.py"
-            if not query_script.exists():
-                logger.warning(f"Notion query script not found: {query_script}")
+            if not self.notion_query_script.exists():
+                logger.warning(f"Notion query script not found: {self.notion_query_script}")
                 return
             
             # Set up environment for the query
-            env = os.environ.copy()
-            env['NOTION_TOKEN'] = self.notion_token
-            env['NOTION_DATABASE_ID'] = self.database_id
+            env = self._get_digitizer_environment()
             
-            # Run query to get existing dates
+            # Run notion_query.py to get existing dates
             result = subprocess.run(
-                ['python', str(query_script)],
+                ['python', str(self.notion_query_script)],
                 cwd=str(self.digitizer_path),
                 env=env,
                 capture_output=True,
                 text=True,
-                timeout=60
+                timeout=120
             )
             
             if result.returncode == 0:
@@ -80,6 +82,37 @@ class DateValidator:
                 
         except Exception as e:
             logger.error(f"Error loading existing dates: {e}")
+    
+    def _get_digitizer_environment(self) -> Dict[str, str]:
+        """Get environment variables including those from digitizer .env file"""
+        env = os.environ.copy()
+        
+        # Load .env file from digitizer directory
+        env_file = self.digitizer_path / ".env"
+        if env_file.exists():
+            logger.debug(f"Loading environment from {env_file}")
+            try:
+                with open(env_file, 'r') as f:
+                    for line in f:
+                        line = line.strip()
+                        if line and not line.startswith('#') and '=' in line:
+                            key, value = line.split('=', 1)
+                            # Remove quotes if present
+                            if value.startswith('"') and value.endswith('"'):
+                                value = value[1:-1]
+                            if value.startswith("'") and value.endswith("'"):
+                                value = value[1:-1]
+                            env[key] = value
+            except Exception as e:
+                logger.warning(f"Error loading .env file: {e}")
+        
+        # Override with explicit values if provided
+        if self.notion_token:
+            env['NOTION_TOKEN'] = self.notion_token
+        if self.database_id:
+            env['NOTION_DATABASE_ID'] = self.database_id
+        
+        return env
     
     def _parse_existing_dates(self):
         """Parse existing dates from Notion query results"""
@@ -100,7 +133,7 @@ class DateValidator:
             logger.error(f"Error parsing existing dates: {e}")
     
     def extract_date_from_image(self, image_path: str) -> Optional[datetime]:
-        """Extract date from image using existing digitizer OCR"""
+        """Extract date from image using existing digitizer"""
         try:
             # Use existing planner_digitizer.py for OCR
             digitizer_script = self.digitizer_path / "planner_digitizer.py"
@@ -108,13 +141,12 @@ class DateValidator:
                 logger.error(f"Digitizer script not found: {digitizer_script}")
                 return None
             
-            # Set up environment
-            env = os.environ.copy()
-            env['OPENAI_API_KEY'] = os.getenv('OPENAI_API_KEY', '')
+            # Set up environment from digitizer .env
+            env = self._get_digitizer_environment()
             
-            # Run digitizer to extract content
+            # Run digitizer to extract content (step 1 only)
             result = subprocess.run(
-                ['python', str(digitizer_script), image_path, '--test'],
+                ['python', str(digitizer_script), image_path, '--parser', 'simple'],
                 cwd=str(self.digitizer_path),
                 env=env,
                 capture_output=True,
@@ -123,7 +155,25 @@ class DateValidator:
             )
             
             if result.returncode == 0:
-                # Parse the output for date information
+                # Try to extract date from stdout first
+                date_from_stdout = self._extract_date_from_output(result.stdout)
+                if date_from_stdout:
+                    return date_from_stdout
+                
+                # Try to find and parse the generated JSON file
+                json_file = self._find_generated_json_file(image_path)
+                if json_file:
+                    with open(json_file, 'r') as f:
+                        data = json.load(f)
+                    
+                    # Extract date from planner_data.date field
+                    planner_data = data.get("planner_data", {})
+                    date_str = planner_data.get("date")
+                    
+                    if date_str:
+                        return self._parse_date_string(date_str)
+                
+                # Fallback to parsing stdout
                 return self._extract_date_from_output(result.stdout)
             else:
                 logger.error(f"Digitizer failed for {image_path}: {result.stderr}")
@@ -134,6 +184,35 @@ class DateValidator:
             return None
         except Exception as e:
             logger.error(f"Error extracting date from {image_path}: {e}")
+            return None
+    
+    def _find_generated_json_file(self, image_path: str) -> Optional[Path]:
+        """Find the JSON file generated for this image"""
+        try:
+            image_name = Path(image_path).stem
+            
+            # Check for JSON files in the Solution Outputs directory
+            output_dir = Path("/Users/shashanksingh/Desktop/AI Test Cases/Daily Planner Exports/Solution Outputs")
+            
+            # Look for [image_name]_processed.json
+            json_file = output_dir / f"{image_name}_processed.json"
+            if json_file.exists():
+                return json_file
+            
+            # Also check in the digitizer directory
+            json_file = self.digitizer_path / f"{image_name}_processed.json"
+            if json_file.exists():
+                return json_file
+            
+            # Look for any recently created JSON files
+            for json_file in output_dir.glob("*_processed.json"):
+                if json_file.stat().st_mtime > time.time() - 300:  # Last 5 minutes
+                    return json_file
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error finding JSON file for {image_path}: {e}")
             return None
     
     def _extract_date_from_output(self, output: str) -> Optional[datetime]:
@@ -335,7 +414,7 @@ def test_date_validator():
     load_dotenv()
     
     # Test configuration
-    digitizer_path = "/Users/shashanksingh/Desktop/AI Projects/Planner Digitizer"
+    digitizer_path = "/Users/shashanksingh/Desktop/AI Projects/dailyplanner-digitizer-automation"
     notion_token = os.getenv('NOTION_TOKEN', '')
     database_id = os.getenv('NOTION_DATABASE_ID', '')
     
